@@ -1,0 +1,380 @@
+---
+title: "Finding similar customer shopping visits and mine association rules in Walmart baskets"
+author: "Sudeeptha Sivarajan"
+date: "2025-07-16"
+output: 
+  html_document:
+    number_sections: yes
+    toc: yes
+    fig_width: 15
+    fig_height: 10
+editor_options: 
+  chunk_output_type: inline
+warnings : False
+---
+
+```{r setup, include=FALSE, warning = FALSE, message = FALSE}
+#install.packages(c("C50", "caret", "rminer", "rmarkdown", "tictoc", "tidyverse", "arules", "arulesViz", "cluster", "proxy"))
+```
+# Load packages, prepare and inspect the data
+```{r, package loading, data import, inspection, and transformation}
+# 1 A- Load the following packages
+library(caret)
+library(RWeka)
+library(rminer)
+library(matrixStats)
+library(knitr)
+library(kernlab)
+library(tictoc)
+library(tidyverse)
+library(e1071)
+library(Metrics)
+library(C50)
+library(psych)
+library(arules)
+library(arulesViz)
+library(cluster)
+library(proxy)
+
+walmart_df <- read.csv("Walmart_visits_7trips.csv", stringsAsFactors = FALSE)
+str(walmart_df)
+summary(walmart_df)
+
+char_cols <- sapply(walmart_df, is.character)
+numeric_cols <- sapply(walmart_df, is.numeric)
+walmart_df[char_cols] <- lapply(walmart_df[char_cols], as.factor)
+str(walmart_df)
+summary(walmart_df)
+
+numeric_data <- walmart_df[, numeric_cols]
+walmart_df$TripType <- as.factor(walmart_df$TripType)
+
+# 1B - Using pairs.panels to visualize relationships
+pairs.panels(numeric_data,
+               method = "pearson",
+               hist.col = "blue",
+               density = TRUE,
+               ellipses = FALSE)
+
+#1C - Build C5.0 model with pruning using CF = 0.10
+set.seed(123) 
+c5_model <- C5.0(x = walmart_df[, !names(walmart_df) %in% "TripType"],
+                 y = walmart_df$TripType,
+                 control = C5.0Control(CF = 0.10))
+
+plot(c5_model)
+summary(c5_model) 
+length(c5_model)
+```
+# Use SimpleKMeans clustering  to understand visits
+```{r}
+# A. Save number of unique TripTypes
+TripType.levels <- nlevels(walmart_df$TripType)
+walmart_df$TripType <- as.factor(walmart_df$TripType)
+
+numeric_cols <- sapply(walmart_df, is.numeric)
+
+# Subset only numeric columns
+walmart_numeric <- walmart_df[, numeric_cols]
+walmart_numeric <- na.omit(walmart_numeric)
+
+# 2B. Default K-means (random init, Euclidean) ---
+set.seed(123)
+kmeans_default <- kmeans(
+  x = walmart_numeric,
+  centers = TripType.levels
+)
+
+# Print centroids and standard deviations
+print("Centroids (Default K-means):")
+print(kmeans_default$centers)
+
+# Compute within-cluster standard deviations, handling singleton clusters
+cat("\nWithin-cluster standard deviations (Default K-means):\n")
+within_sd <- sapply(1:TripType.levels, function(i) {
+  cluster_data <- walmart_numeric[kmeans_default$cluster == i, , drop = FALSE]
+  if (nrow(cluster_data) <= 1) {
+    # Return 0 or NA for clusters with 1 or 0 points
+    return(rep(0, ncol(cluster_data))) 
+  }
+  apply(cluster_data, 2, sd, na.rm = TRUE)
+})
+
+# Transpose for better readability: rows = clusters, columns = features
+rownames(within_sd) <- colnames(walmart_numeric)
+colnames(within_sd) <- paste0("Cluster_", 1:TripType.levels)
+
+print(t(within_sd))
+
+# 2C. K-means++ Initialization (Euclidean, centers = TripType.levels) ---
+set.seed(123)
+kmeans_plus <- kmeans(
+  x = walmart_numeric,
+  centers = TripType.levels,
+  # Do NOT specify algorithm — default uses Hartigan-Wong + K-means++ init
+  # K-means++ is automatic when centers = integer (not pre-supplied matrix)
+  nstart = 1  # optional: use 1 to ensure single run with K-means++ init
+)
+
+# Print centroids
+cat("\nCentroids (K-means++):\n")
+print(kmeans_plus$centers)
+
+# Compute within-cluster standard deviations, handling singleton clusters
+cat("\nWithin-cluster standard deviations (K-means++):\n")
+within_sd_plus <- sapply(1:TripType.levels, function(i) {
+  cluster_data <- walmart_numeric[kmeans_plus$cluster == i, , drop = FALSE]
+  if (nrow(cluster_data) <= 1) {
+    return(rep(0, ncol(cluster_data)))  # or rep(NA_real_, ...) if preferred
+  }
+  apply(cluster_data, 2, sd, na.rm = TRUE)
+})
+
+# Transpose and label for readability
+rownames(within_sd_plus) <- colnames(walmart_numeric)
+colnames(within_sd_plus) <- paste0("Cluster_", 1:TripType.levels)
+
+# Print transposed (clusters as rows)
+print(t(within_sd_plus))
+cat("\nCluster sizes (K-means++):\n")
+print(table(kmeans_plus$cluster))
+
+# 2D. PAM with Manhattan distance (L1), fixed k = TripType.levels
+set.seed(123)
+pam_manhattan <- pam(
+  x = walmart_numeric,
+  k = TripType.levels,
+  metric = "manhattan",  
+  stand = FALSE           
+)
+
+cat("\nMedoids (Manhattan PAM):\n")
+print(pam_manhattan$medoids)
+
+cat("\nWithin-cluster standard deviations (Manhattan PAM):\n")
+within_sd_manhattan <- sapply(1:TripType.levels, function(i) {
+  cluster_data <- walmart_numeric[pam_manhattan$clustering == i, , drop = FALSE]
+  if (nrow(cluster_data) <= 1) {
+    return(rep(0, ncol(cluster_data)))
+  }
+  apply(cluster_data, 2, sd, na.rm = TRUE)
+})
+
+rownames(within_sd_manhattan) <- colnames(walmart_numeric)
+colnames(within_sd_manhattan) <- paste0("Cluster_", 1:TripType.levels)
+print(t(within_sd_manhattan))
+cat("\nCluster sizes (Manhattan PAM):\n")
+print(table(pam_manhattan$clustering))
+
+#2E 
+custom_k <- TripType.levels + 2
+cosine_dist <- dist(walmart_numeric, method = "cosine")
+
+hc_cosine <- hclust(cosine_dist, method = "ward.D2")
+initial_clusters <- cutree(hc_cosine, k = custom_k)
+
+set.seed(123)
+pam_cosine <- pam(
+  x = cosine_dist,   
+  k = custom_k,
+  diss = TRUE
+)
+
+cat("\nMedoids (Cosine Distance PAM):\n")
+medoid_indices <- pam_cosine$medoids
+cosine_medoids <- walmart_numeric[medoid_indices, ]
+print(cosine_medoids)
+
+cat("\nWithin-cluster standard deviations (Cosine PAM):\n")
+within_sd_cosine <- sapply(1:custom_k, function(i) {
+  cluster_data <- walmart_numeric[pam_cosine$clustering == i, , drop = FALSE]
+  if (nrow(cluster_data) <= 1) {
+    return(rep(0, ncol(cluster_data)))
+  }
+  apply(cluster_data, 2, sd, na.rm = TRUE)
+})
+
+rownames(within_sd_cosine) <- colnames(walmart_numeric)
+colnames(within_sd_cosine) <- paste0("Cluster_", 1:custom_k)
+print(t(within_sd_cosine))
+cat("\nCluster sizes (Cosine PAM):\n")
+print(table(pam_cosine$clustering))
+```
+
+# Market Basket Analysis with the Walmart dept baskets 
+```{r}
+library(arules)
+library(arulesViz)
+# A. Import the transaction data
+Dept_baskets <- read.transactions(
+  file = "Walmart_baskets_1week.csv",
+  format = "single",
+   sep = ",",
+  header = TRUE,
+  cols = c("VisitNumber","DepartmentDescription")
+)
+# View summary of the transactions
+summary(Dept_baskets)
+# B. Inspect first 15 transactions
+inspect(Dept_baskets[1:15])
+
+# C. Item frequency plot for top 15 items
+itemFrequencyPlot(
+  Dept_baskets,
+  topN = 15,
+  type = "absolute",
+  main = "Top 15 Most Frequent Department Visits"
+)
+itemFrequencyPlot(
+  Dept_baskets,
+  topN = 15,
+  type = "relative",
+  main = "Top 15 Most Frequent Department Visits (Percentage)"
+)
+
+# D.i. Generate about 50-100 rules
+rules_50_100 <- apriori(
+  data = Dept_baskets,
+  parameter = list(
+    support = 0.01,
+    confidence = 0.25,
+    minlen = 2        
+  )
+)
+rules_sorted_lift <- sort(rules_50_100, by = "lift", decreasing = TRUE)
+
+# Inspect top 10 rules
+inspect(rules_sorted_lift[1:10])
+length(rules_sorted_lift)
+
+rules_100_200 <- apriori(
+  data = Dept_baskets,
+  parameter = list(
+    support = 0.0075,
+    confidence = 0.20,
+    minlen = 2
+  )
+)
+
+# Sort by confidence
+rules_by_confidence <- sort(rules_100_200, by = "confidence", decreasing = TRUE)
+inspect(head(rules_by_confidence, 1))
+
+rules_sorted_lift_large <- sort(rules_100_200, by = "lift", decreasing = TRUE)
+inspect(rules_sorted_lift_large[1:10])
+length(rules_sorted_lift_large)
+
+head(itemFrequency(Dept_baskets, type = "relative"), 20)
+plot(rules_sorted_lift[1:10], method = "graph", control = list(type = "items"))
+subset_rules <- subset(rules_sorted_lift, subset = lift > 2)
+subset_rules
+```
+```{r}
+
+# For K-means (Euclidean): use tot.withinss
+wcss_default <- kmeans_default$tot.withinss
+wcss_plus   <- kmeans_plus$tot.withinss
+wcss_manhattan <- pam_manhattan$critval  
+wcss_cosine    <- pam_cosine$critval     
+
+#Compute average silhouette widths using base cluster::silhouette
+sil_default   <- silhouette(kmeans_default$cluster,   dist(walmart_numeric))
+sil_plus      <- silhouette(kmeans_plus$cluster,      dist(walmart_numeric))
+sil_manhattan <- silhouette(pam_manhattan$clustering, dist(walmart_numeric, method = "manhattan"))
+sil_cosine    <- silhouette(pam_cosine$clustering,    dist(walmart_numeric, method = "cosine"))
+
+avg_sil <- c(
+  Default_Kmeans = mean(sil_default[, "sil_width"]),
+  Kmeans_Plus    = mean(sil_plus[, "sil_width"]),
+  PAM_Manhattan  = mean(sil_manhattan[, "sil_width"]),
+  PAM_Cosine     = mean(sil_cosine[, "sil_width"])
+)
+print("Average Silhouette Width (Higher = Better):")
+print(round(avg_sil, 4))
+
+sizes <- list(
+  Default_Kmeans = table(kmeans_default$cluster),
+  Kmeans_Plus    = table(kmeans_plus$cluster),
+  PAM_Manhattan  = table(pam_manhattan$clustering),
+  PAM_Cosine     = table(pam_cosine$clustering)
+)
+
+print("Cluster Sizes:")
+lapply(names(sizes), function(name) {
+  cat("\n", name, ":\n")
+  print(sizes[[name]])
+})
+
+compute_avg_within_sd <- function(clusters, data) {
+  k <- length(unique(clusters))
+  total_sd <- sapply(1:k, function(i) {
+    cluster_data <- data[clusters == i, , drop = FALSE]
+    if (nrow(cluster_data) <= 1) return(0)
+    mean(apply(cluster_data, 2, sd, na.rm = TRUE))
+  })
+  mean(total_sd, na.rm = TRUE)
+}
+
+avg_within_sd <- c(
+  Default_Kmeans = compute_avg_within_sd(kmeans_default$cluster, walmart_numeric),
+  Kmeans_Plus    = compute_avg_within_sd(kmeans_plus$cluster,    walmart_numeric),
+  PAM_Manhattan  = compute_avg_within_sd(pam_manhattan$clustering, walmart_numeric),
+  PAM_Cosine     = compute_avg_within_sd(pam_cosine$clustering,    walmart_numeric)
+)
+print("Average Within-Cluster Standard Deviation (Lower = Tighter):")
+print(round(avg_within_sd, 4))
+
+
+comparison_table <- data.frame(
+  Method = names(avg_sil),
+  Avg_Silhouette = round(avg_sil, 4),
+  Avg_Within_SD = round(avg_within_sd, 4),
+  Total_Dissimilarity = round(c(wcss_default, wcss_plus, wcss_manhattan, wcss_cosine), 2),
+  Cluster_Count = c(TripType.levels, TripType.levels, TripType.levels, custom_k),
+  stringsAsFactors = FALSE
+)
+
+rownames(comparison_table) <- NULL
+print("📋 CLUSTERING COMPARISON SUMMARY:")
+print(comparison_table)
+```
+
+# Reflections
+The analysis was performed using a minimum support level of 1% and a minimum confidence level of 25%.
+The rule with the highest lift was:
+**Frozen Foods + Produce → Dry Goods**, with a lift of *3.06*, support of 1.08%, and confidence of 47%.
+The rule with the highest support was:
+**Dairy → Produce**, with support of 2.09%, confidence of 41.8%, and lift of *2.41*.
+The rule with the highest confidence was:
+Deli + Dry Goods + Frozen Foods + Produce → Dairy, with confidence of 55.1%.
+
+Among these, the rule **Frozen Foods + Produce → Dry Goods** is most recommended for sales executives. Although it has lower support, it provides the strongest lift, meaning that when customers buy Frozen Foods and Produce together, they are three times more likely than average to also purchase Dry Goods. This indicates a powerful cross-selling opportunity.
+The items are diverse but complementary, and reasonable support (1.08%) making it operationally meaningful. 
+
+
+***Standard deviation and cluster count:***
+The spread of clusters varied with different algorithms and distance metrics. For example, PAM with Manhattan distance reduced average cluster deviation, forming tighter and more distinct groups. In contrast, cosine distance produced wider clusters. This change occurred because each method measures similarity differently, affecting how close or spread out the customers are grouped.
+
+***Support vs. Confidence:***
+Support represents how frequently a rule appears across all transactions, while confidence shows the probability that the rule holds once the first condition is met. In this dataset, support values were lower (around 1–2%) compared to confidence values (40–55%). This is expected, since not all combinations of items occur frequently, but when they do, the likelihood of the rule being true can still be high.
+
+***Decision Tree (C5.0):***
+The most influential factor for predicting whether a trip involved returns was **Net Quantity**. Trips with few or negative quantities were highly associated with returns. Other predictors such as Unique Departments and Total Quantity helped identify large, multi-department shopping trips. Adjusting hyperparameters, such as lowering the confidence factor, reduced overfitting and produced a clearer, more interpretable tree.
+UniqDepts > 2 and TotalQty > 5 helped define high-volume, multi-department shoppers.
+Hyperparameter adjustments helped prevent overfitting and created a smaller, more interpretable tree. Tree modeling helps understand the hierarchical decision paths and categorize different shopping behaviors.
+
+***Clustering (K-Means, K-Means++, PAM):***
+Clustering uncovered different shopper types. Some clusters like cluster 6 represented quick trips with only one or two items, while others like cluster 3 captured bulk family shopping across multiple departments. K-Means++ provided more stable clusters compared to standard K-Means. PAM with Manhattan distance resulted in tighter, more compact clusters, while cosine distance produced looser groupings. 
+The Hyperparameter Adjustments gave better centroid initialization, improving stability.
+Clustering (hidden discoveries) showed different types of shoppers- the quick errand buyers, bulk family shoppers, and returns-only visits.
+
+***Association Rule Mining***:
+The rules revealed hidden product affinities across departments. Several rules had lift values above 2, suggesting real behavioral patterns rather than chance. For instance, strong connections between Frozen Foods, Produce, and Dry Goods highlight potential bundling strategies.
+
+***Explaination at Business Level:***
+The models together provide a layered understanding of customer behavior.
+The **decision tree** shows that *Net Quantity* is the most important driver in distinguishing purchase-only trips from trips involving returns. This insight can be used in return management and fraud detection.
+The **clustering** results reveal distinct customer profiles: small, quick errand shoppers versus bulk, multi-department buyers. These patterns can support tailored marketing strategies and store layout decisions.
+The **association** rules highlight valuable cross-selling opportunities, such as customers who buy Frozen Foods and Produce being three times more likely to also buy Dry Goods. This knowledge can guide promotions, product placement, and bundling strategies.
+Overall, the models classify trips and uncover hidden buying patterns that support retail decision-making.
+
