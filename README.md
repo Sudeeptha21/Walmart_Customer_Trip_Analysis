@@ -36,13 +36,18 @@ For **association rule mining**, transactions are represented at the department 
 
 3. **Association Rule Mining (Apriori):**  
    - Discovers relationships between departments.  
-   - Example: *Frozen Foods + Produce → Dry Goods (Lift = 3.06)*.  
+   - Example: *Frozen Foods + Produce → Dry Goods (Lift = 3.06)*.
 
 ## 📈 Key Insights
 - **Net Quantity** is the strongest indicator of whether a trip involves returns.  
 - Clustering reveals **distinct shopper types**, from single-item trips to large, multi-department visits.  
 - Association rules identify **cross-selling opportunities**, e.g., customers buying Frozen Foods and Produce are three times more likely to buy Dry Goods.  
 
+## Interpretation 
+- Four clustering approaches were compared. **K-Means** and **K-Means++** both produced balanced clusters with average silhouette 0.60.
+- PAM with **Manhattan** distance yielded tighter clusters (lowest within-cluster SD) but weaker separation.
+- PAM with Cosine distance achieved the best separation (highest silhouette = 0.73) but resulted in slightly more spread-out clusters.
+ 
 ## 🚀 Applications
 - **Marketing & Promotions:** Bundle or recommend products based on strong associations.  
 - **Customer Segmentation:** Personalize offers for quick errand shoppers vs. bulk family shoppers.  
